@@ -16,8 +16,6 @@ import yt_dlp
 # ============================================================
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-
-# Railway instala FFmpeg mediante Dockerfile
 FFMPEG_PATH = "ffmpeg"
 
 
@@ -47,11 +45,9 @@ print(f"🎧 FFmpeg: {FFMPEG_PATH}")
 
 if shutil.which(FFMPEG_PATH) is None:
     print("❌ NO SE ENCONTRÓ FFmpeg")
-    print("Revisa que FFmpeg esté instalado en Railway.")
     sys.exit(1)
 
 print("✅ FFmpeg encontrado.")
-
 try:
     import davey
     print(
