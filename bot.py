@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import shutil
+import subprocess
 import sys
 from collections import defaultdict
 
@@ -150,6 +151,27 @@ except ImportError:
 
     print(
         "❌ davey no está instalado."
+    )
+
+    sys.exit(1)
+
+
+# --- NUEVO: chequeo de PyNaCl (necesario para transmitir voz) ---
+try:
+
+    import nacl  # noqa: F401
+
+    print(
+        "🔑 PyNaCl: instalado."
+    )
+
+except ImportError:
+
+    print(
+        "❌ PyNaCl no está instalado. "
+        "Instalá 'PyNaCl' (pip install PyNaCl) "
+        "o el bot se conectará a voz pero NO podrá "
+        "enviar audio."
     )
 
     sys.exit(1)
@@ -565,7 +587,8 @@ async def connect_to_voice(
 
             vc = await channel.connect(
                 reconnect=True,
-                timeout=30
+                timeout=30,
+                self_deaf=True,
             )
 
             log.info(
@@ -600,8 +623,35 @@ async def connect_to_voice(
 # ============================================================
 
 def create_audio_source(
-    audio_url: str
+    audio_url: str,
+    http_headers: dict | None = None,
 ):
+    """
+    IMPORTANTE: la URL directa que entrega yt-dlp (googlevideo.com)
+    solo funciona si ffmpeg manda las MISMAS cabeceras HTTP
+    (User-Agent, etc.) que usó yt-dlp para extraerla. Sin esto,
+    YouTube devuelve 403 / stream vacío y el bot "reproduce"
+    pero no suena nada.
+    """
+
+    headers = http_headers or {}
+
+    # yt-dlp entrega headers tipo {"User-Agent": "...", "Referer": "..."}
+    header_lines = "".join(
+        f"{key}: {value}\r\n"
+        for key, value in headers.items()
+    )
+
+    before_options = (
+        "-reconnect 1 "
+        "-reconnect_streamed 1 "
+        "-reconnect_delay_max 5 "
+    )
+
+    if header_lines:
+
+        # Se pasa como un solo argumento con las cabeceras separadas por \r\n
+        before_options += f'-headers "{header_lines}" '
 
     source = discord.FFmpegPCMAudio(
 
@@ -609,18 +659,18 @@ def create_audio_source(
 
         executable=FFMPEG_PATH,
 
-        before_options=(
-            "-reconnect 1 "
-            "-reconnect_streamed 1 "
-            "-reconnect_delay_max 5"
-        ),
+        before_options=before_options,
 
         options=(
             "-vn "
             "-loglevel warning "
             "-ac 2 "
             "-ar 48000"
-        )
+        ),
+
+        # NUEVO: capturamos stderr de ffmpeg para poder loguear
+        # el motivo real si el audio falla en silencio.
+        stderr=subprocess.PIPE,
     )
 
 
@@ -909,6 +959,14 @@ async def play(
         )
 
 
+        # NUEVO: cabeceras HTTP que yt-dlp usó para esta extracción,
+        # necesarias para que ffmpeg pueda leer el stream.
+        http_headers = data.get(
+            "http_headers",
+            {}
+        )
+
+
         title = data.get(
             "title",
             "Canción desconocida"
@@ -940,7 +998,8 @@ async def play(
 
 
         source = create_audio_source(
-            audio_url
+            audio_url,
+            http_headers,
         )
 
 
@@ -954,7 +1013,35 @@ async def play(
                     error
                 )
 
-            else:
+            # NUEVO: mostramos el stderr real de ffmpeg si hubo
+            # un fallo silencioso (sin excepción pero sin audio).
+            try:
+
+                stderr_output = (
+                    source.original.proc.stderr.read()
+                    if hasattr(source, "original")
+                    else None
+                )
+
+                if stderr_output:
+
+                    text = stderr_output.decode(
+                        errors="ignore"
+                    ).strip()
+
+                    if text:
+
+                        log.warning(
+                            "ffmpeg stderr para '%s':\n%s",
+                            title,
+                            text
+                        )
+
+            except Exception:
+
+                pass
+
+            if not error:
 
                 log.info(
                     "Terminó: %s",
