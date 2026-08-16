@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import shutil
+import sys
 from collections import defaultdict
 
 import discord
@@ -11,28 +12,23 @@ import yt_dlp
 
 
 # ============================================================
-# CONFIG
+# CONFIGURACIÓN
 # ============================================================
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-FFMPEG_PATH = shutil.which("ffmpeg") or "ffmpeg"
 
-COOKIES_TEXT = os.getenv("YOUTUBE_COOKIES", "")
+FFMPEG_PATH = "ffmpeg"
+
+YOUTUBE_COOKIES = os.getenv(
+    "YOUTUBE_COOKIES",
+    ""
+)
+
 COOKIES_FILE = "/tmp/youtube_cookies.txt"
-
-if COOKIES_TEXT.strip():
-    try:
-        with open(COOKIES_FILE, "w", encoding="utf-8") as f:
-            f.write(COOKIES_TEXT)
-
-        os.chmod(COOKIES_FILE, 0o600)
-        print("🍪 Cookies de YouTube cargadas.")
-    except Exception as e:
-        print(f"⚠️ No se pudieron guardar las cookies: {e}")
 
 
 # ============================================================
-# LOG
+# LOGGING
 # ============================================================
 
 logging.basicConfig(
@@ -44,10 +40,133 @@ log = logging.getLogger("Azulita")
 
 
 # ============================================================
+# COOKIES DE YOUTUBE
+# ============================================================
+
+if YOUTUBE_COOKIES.strip():
+
+    try:
+
+        with open(
+            COOKIES_FILE,
+            "w",
+            encoding="utf-8",
+            newline="\n"
+        ) as f:
+
+            f.write(
+                YOUTUBE_COOKIES
+            )
+
+        os.chmod(
+            COOKIES_FILE,
+            0o600
+        )
+
+        print(
+            "🍪 Cookies de YouTube cargadas."
+        )
+
+    except Exception as e:
+
+        print(
+            f"❌ Error guardando cookies: {e}"
+        )
+
+else:
+
+    print(
+        "⚠️ YOUTUBE_COOKIES no está configurada."
+    )
+
+
+# ============================================================
+# COMPROBACIONES
+# ============================================================
+
+print()
+print("======================================")
+print("🔍 COMPROBANDO INSTALACIÓN")
+print("======================================")
+
+print(
+    f"🐍 Python: {sys.version}"
+)
+
+print(
+    f"📦 discord.py: {discord.__version__}"
+)
+
+print(
+    f"📦 yt-dlp: {yt_dlp.version.__version__}"
+)
+
+print(
+    f"🎧 FFmpeg: {FFMPEG_PATH}"
+)
+
+
+if shutil.which(
+    FFMPEG_PATH
+) is None:
+
+    print(
+        "❌ NO SE ENCONTRÓ FFmpeg"
+    )
+
+    sys.exit(1)
+
+
+print(
+    "✅ FFmpeg encontrado."
+)
+
+
+if os.path.isfile(
+    COOKIES_FILE
+):
+
+    print(
+        "🍪 yt-dlp utilizará las cookies."
+    )
+
+else:
+
+    print(
+        "⚠️ yt-dlp funcionará sin cookies."
+    )
+
+
+try:
+
+    import davey
+
+    print(
+        "🔐 davey: "
+        f"{getattr(davey, '__version__', 'instalado')}"
+    )
+
+except ImportError:
+
+    print(
+        "❌ davey no está instalado."
+    )
+
+    sys.exit(1)
+
+
+print(
+    "======================================"
+)
+print()
+
+
+# ============================================================
 # INTENTS
 # ============================================================
 
 intents = discord.Intents.default()
+
 intents.guilds = True
 intents.voice_states = True
 
@@ -59,506 +178,41 @@ intents.voice_states = True
 class MusicBot(commands.Bot):
 
     def __init__(self):
+
         super().__init__(
             command_prefix="!",
             intents=intents
         )
 
-        # guild_id -> lista de canciones
         self.queues = defaultdict(list)
 
-        # guild_id -> tarea que reproduce la cola
-        self.queue_tasks = {}
+        self.voice_locks = defaultdict(
+            asyncio.Lock
+        )
 
-        # guild_id -> lock de voz
-        self.voice_locks = defaultdict(asyncio.Lock)
-
-        # guild_id -> canal de voz
         self.join_channels = {}
 
 
-bot = MusicBot()
-
-
-# ============================================================
-# YT-DLP
-# ============================================================
-
-YTDLP_BASE = {
-    "format": "bestaudio/best",
-    "noplaylist": False,
-    "quiet": True,
-    "no_warnings": True,
-    "default_search": "ytsearch",
-    "source_address": "0.0.0.0",
-    "extract_flat": False,
-    "skip_download": True,
-    "retries": 3,
-    "fragment_retries": 3,
-    "socket_timeout": 20,
-    "geo_bypass": True,
-}
-
-if os.path.isfile(COOKIES_FILE):
-    YTDLP_BASE["cookiefile"] = COOKIES_FILE
-
-
-# ============================================================
-# EXTRAER INFORMACIÓN
-# ============================================================
-
-async def yt_extract(query, playlist=False):
-
-    options = YTDLP_BASE.copy()
-    options["noplaylist"] = not playlist
-
-    loop = asyncio.get_running_loop()
-
-    def extract():
-        with yt_dlp.YoutubeDL(options) as ydl:
-            return ydl.extract_info(
-                query,
-                download=False
-            )
-
-    return await loop.run_in_executor(None, extract)
-
-
-# ============================================================
-# BUSCAR / OBTENER CANCIONES
-# ============================================================
-
-async def get_tracks(query):
-
-    try:
-
-        # Si es playlist de YouTube
-        if "playlist" in query.lower() or "list=" in query:
-
-            data = await yt_extract(
-                query,
-                playlist=True
-            )
-
-            if not data:
-                raise RuntimeError(
-                    "YouTube no devolvió información."
-                )
-
-            entries = data.get("entries") or []
-
-            tracks = []
-
-            for entry in entries:
-
-                if not entry:
-                    continue
-
-                webpage = entry.get("webpage_url")
-
-                if not webpage:
-                    webpage = entry.get("url")
-
-                if not webpage:
-                    continue
-
-                tracks.append({
-                    "title": entry.get(
-                        "title",
-                        "Canción desconocida"
-                    ),
-                    "url": webpage
-                })
-
-            if not tracks:
-                raise RuntimeError(
-                    "La playlist no contiene canciones válidas."
-                )
-
-            return tracks
-
-        # Canción normal / búsqueda
-        data = await yt_extract(
-            query,
-            playlist=False
-        )
-
-        if not data:
-            raise RuntimeError(
-                "YouTube no devolvió información."
-            )
-
-        if "entries" in data:
-
-            entries = data.get("entries") or []
-
-            if not entries:
-                raise RuntimeError(
-                    "No se encontró la canción."
-                )
-
-            data = entries[0]
-
-        webpage = data.get("webpage_url")
-
-        if not webpage:
-            webpage = query
-
-        return [{
-            "title": data.get(
-                "title",
-                "Canción desconocida"
-            ),
-            "url": webpage
-        }]
-
-    except Exception as e:
-
-        log.exception(
-            "Error obteniendo canciones"
-        )
-
-        raise RuntimeError(
-            f"No se pudo obtener la canción o playlist.\n\n{e}"
-        )
-
-
-# ============================================================
-# OBTENER URL DE AUDIO
-# ============================================================
-
-async def get_audio_url(webpage):
-
-    """
-    IMPORTANTE:
-    Se vuelve a ejecutar yt-dlp cada vez que comienza
-    una canción. Así evitamos usar URLs de audio caducadas.
-    """
-
-    try:
-
-        data = await yt_extract(
-            webpage,
-            playlist=False
-        )
-
-        if not data:
-            raise RuntimeError(
-                "YouTube no devolvió información."
-            )
-
-        if "entries" in data:
-
-            entries = data.get("entries") or []
-
-            if not entries:
-                raise RuntimeError(
-                    "No se encontró el audio."
-                )
-
-            data = entries[0]
-
-        audio_url = data.get("url")
-
-        if not audio_url:
-            raise RuntimeError(
-                "YouTube no entregó una URL de audio."
-            )
-
-        return {
-            "audio_url": audio_url,
-            "title": data.get(
-                "title",
-                "Canción desconocida"
-            ),
-            "webpage": data.get(
-                "webpage_url",
-                webpage
-            )
-        }
-
-    except Exception as e:
-
-        log.exception(
-            "Error extrayendo audio"
-        )
-
-        raise RuntimeError(str(e))
-
-
-# ============================================================
-# VOZ
-# ============================================================
-
-async def connect_voice(guild, channel):
-
-    async with bot.voice_locks[guild.id]:
-
-        vc = guild.voice_client
-
-        if vc and vc.is_connected():
-
-            if vc.channel and vc.channel.id == channel.id:
-                return vc
-
-            try:
-                await vc.move_to(channel)
-                return vc
-
-            except Exception:
-                pass
-
-        if vc:
-
-            try:
-                await vc.disconnect(force=True)
-            except Exception:
-                pass
-
-            await asyncio.sleep(1)
+    async def setup_hook(self):
 
         try:
 
-            vc = await channel.connect(
-                reconnect=True,
-                timeout=30
-            )
-
-            bot.join_channels[guild.id] = channel.id
+            synced = await self.tree.sync()
 
             log.info(
-                "Conectado a voz: %s",
-                channel.name
+                "Comandos sincronizados: %s",
+                len(synced)
             )
-
-            return vc
 
         except Exception as e:
 
-            raise RuntimeError(
-                f"No pude conectarme al canal: {e}"
+            log.exception(
+                "Error sincronizando comandos: %s",
+                e
             )
 
 
-# ============================================================
-# FFmpeg
-# ============================================================
-
-def create_source(audio_url):
-
-    return discord.PCMVolumeTransformer(
-        discord.FFmpegPCMAudio(
-            audio_url,
-            executable=FFMPEG_PATH,
-            before_options=(
-                "-reconnect 1 "
-                "-reconnect_streamed 1 "
-                "-reconnect_delay_max 5"
-            ),
-            options=(
-                "-vn "
-                "-loglevel warning "
-                "-ac 2 "
-                "-ar 48000"
-            )
-        ),
-        volume=0.7
-    )
-
-
-# ============================================================
-# REPRODUCIR COLA
-# ============================================================
-
-async def play_queue(guild):
-
-    guild_id = guild.id
-
-    try:
-
-        while bot.queues[guild_id]:
-
-            item = bot.queues[guild_id][0]
-
-            vc = guild.voice_client
-
-            if not vc or not vc.is_connected():
-
-                channel_id = bot.join_channels.get(guild_id)
-
-                if not channel_id:
-                    log.warning(
-                        "No hay canal guardado para %s",
-                        guild.name
-                    )
-                    break
-
-                channel = guild.get_channel(channel_id)
-
-                if not channel:
-                    break
-
-                vc = await connect_voice(
-                    guild,
-                    channel
-                )
-
-            # =================================================
-            # RE-EXTRAER AUDIO
-            # =================================================
-
-            try:
-
-                log.info(
-                    "Extrayendo: %s",
-                    item["title"]
-                )
-
-                info = await get_audio_url(
-                    item["url"]
-                )
-
-                audio_url = info["audio_url"]
-
-                title = info["title"]
-
-                item["title"] = title
-
-            except Exception as e:
-
-                log.error(
-                    "No se pudo reproducir %s: %s",
-                    item["title"],
-                    e
-                )
-
-                # Sacamos la canción que falló
-                bot.queues[guild_id].pop(0)
-
-                # Continuamos con la siguiente
-                continue
-
-            # =================================================
-            # CREAR AUDIO
-            # =================================================
-
-            finished = asyncio.Event()
-            playback_error = None
-
-            def after(error):
-
-                nonlocal playback_error
-
-                playback_error = error
-
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.call_soon_threadsafe(
-                        finished.set
-                    )
-                except RuntimeError:
-                    pass
-
-            try:
-
-                source = create_source(
-                    audio_url
-                )
-
-                vc.play(
-                    source,
-                    after=after
-                )
-
-            except Exception as e:
-
-                log.exception(
-                    "Error iniciando FFmpeg"
-                )
-
-                bot.queues[guild_id].pop(0)
-
-                continue
-
-            log.info(
-                "▶️ Reproduciendo: %s",
-                title
-            )
-
-            # =================================================
-            # ESPERAR FIN
-            # =================================================
-
-            await finished.wait()
-
-            if playback_error:
-
-                log.error(
-                    "Error reproduciendo %s: %s",
-                    title,
-                    playback_error
-                )
-
-            # =================================================
-            # QUITAR DE LA COLA
-            # =================================================
-
-            if bot.queues[guild_id]:
-
-                bot.queues[guild_id].pop(0)
-
-        log.info(
-            "Cola terminada en %s",
-            guild.name
-        )
-
-    except asyncio.CancelledError:
-
-        log.info(
-            "Cola cancelada en %s",
-            guild.name
-        )
-
-    except Exception:
-
-        log.exception(
-            "Error en reproductor de cola"
-        )
-
-    finally:
-
-        bot.queue_tasks.pop(
-            guild_id,
-            None
-        )
-
-
-# ============================================================
-# INICIAR COLA
-# ============================================================
-
-def start_queue(guild):
-
-    task = bot.queue_tasks.get(guild.id)
-
-    if task and not task.done():
-        return
-
-    bot.queue_tasks[guild.id] = asyncio.create_task(
-        play_queue(guild)
-    )
-
-
-# ============================================================
-# SETUP
-# ============================================================
-
-@bot.event
-async def on_ready():
-
-    try:
-
-        synced = await bot.tree.sync()
+    async def on_ready(self):
 
         log.info(
             "======================================"
@@ -566,12 +220,17 @@ async def on_ready():
 
         log.info(
             "BOT CONECTADO: %s",
-            bot.user
+            self.user
         )
 
         log.info(
-            "Comandos sincronizados: %s",
-            len(synced)
+            "Discord.py: %s",
+            discord.__version__
+        )
+
+        log.info(
+            "yt-dlp: %s",
+            yt_dlp.version.__version__
         )
 
         log.info(
@@ -583,11 +242,392 @@ async def on_ready():
             "======================================"
         )
 
-    except Exception:
 
-        log.exception(
-            "Error en on_ready"
+bot = MusicBot()
+
+
+# ============================================================
+# YT-DLP
+# ============================================================
+
+BASE_YTDLP_OPTIONS = {
+
+    "format": "bestaudio/best",
+
+    "noplaylist": True,
+
+    "quiet": True,
+
+    "no_warnings": True,
+
+    "default_search": "ytsearch",
+
+    "source_address": "0.0.0.0",
+
+    "extract_flat": False,
+
+    "skip_download": True,
+
+    "geo_bypass": True,
+
+    "nocheckcertificate": True,
+
+    "retries": 3,
+
+    "fragment_retries": 3,
+
+    "socket_timeout": 20,
+
+}
+
+
+# ============================================================
+# USAR COOKIES
+# ============================================================
+
+if os.path.isfile(
+    COOKIES_FILE
+):
+
+    BASE_YTDLP_OPTIONS[
+        "cookiefile"
+    ] = COOKIES_FILE
+
+
+# ============================================================
+# CLIENTES YOUTUBE
+# ============================================================
+
+YOUTUBE_CLIENTS = [
+
+    "android_vr",
+
+    "tv",
+
+    "web_embedded",
+
+    "mweb",
+
+    "web_safari",
+
+]
+
+
+# ============================================================
+# EXTRAER YOUTUBE
+# ============================================================
+
+async def extract_with_client(
+    query: str,
+    client: str
+):
+
+    loop = asyncio.get_running_loop()
+
+    options = (
+        BASE_YTDLP_OPTIONS.copy()
+    )
+
+    options[
+        "extractor_args"
+    ] = {
+
+        "youtube": {
+
+            "player_client": [
+                client
+            ]
+
+        }
+
+    }
+
+
+    def extract():
+
+        with yt_dlp.YoutubeDL(
+            options
+        ) as ydl:
+
+            return ydl.extract_info(
+                query,
+                download=False
+            )
+
+
+    return await loop.run_in_executor(
+        None,
+        extract
+    )
+
+
+async def get_youtube_info(
+    query: str
+):
+
+    last_error = None
+
+
+    # ========================================================
+    # PROBAR CLIENTES
+    # ========================================================
+
+    for client in YOUTUBE_CLIENTS:
+
+        try:
+
+            log.info(
+                "Probando YouTube client: %s",
+                client
+            )
+
+            data = (
+                await extract_with_client(
+                    query,
+                    client
+                )
+            )
+
+
+            if not data:
+                continue
+
+
+            if "entries" in data:
+
+                entries = data.get(
+                    "entries"
+                )
+
+                if not entries:
+                    continue
+
+                data = entries[0]
+
+
+            if data.get("url"):
+
+                log.info(
+                    "✅ YouTube funcionó con: %s",
+                    client
+                )
+
+                return data
+
+
+        except Exception as e:
+
+            last_error = e
+
+            log.warning(
+                "Cliente %s falló: %s",
+                client,
+                e
+            )
+
+
+    # ========================================================
+    # ÚLTIMO INTENTO AUTOMÁTICO
+    # ========================================================
+
+    try:
+
+        log.info(
+            "Probando configuración automática de yt-dlp..."
         )
+
+
+        options = (
+            BASE_YTDLP_OPTIONS.copy()
+        )
+
+
+        def extract_default():
+
+            with yt_dlp.YoutubeDL(
+                options
+            ) as ydl:
+
+                return ydl.extract_info(
+                    query,
+                    download=False
+                )
+
+
+        data = await asyncio.get_running_loop().run_in_executor(
+            None,
+            extract_default
+        )
+
+
+        if data:
+
+            if "entries" in data:
+
+                entries = data.get(
+                    "entries"
+                )
+
+                if entries:
+
+                    data = entries[0]
+
+
+            if data.get("url"):
+
+                return data
+
+
+    except Exception as e:
+
+        last_error = e
+
+
+    # ========================================================
+    # ERROR
+    # ========================================================
+
+    if last_error:
+
+        raise RuntimeError(
+            "YouTube bloqueó la extracción desde "
+            "el servidor.\n\n"
+            f"Último error: {last_error}"
+        )
+
+
+    raise RuntimeError(
+        "No se pudo obtener el audio."
+    )
+
+
+# ============================================================
+# CONECTAR A VOZ
+# ============================================================
+
+async def connect_to_voice(
+    guild: discord.Guild,
+    channel: discord.VoiceChannel
+):
+
+    lock = bot.voice_locks[
+        guild.id
+    ]
+
+    async with lock:
+
+        vc = guild.voice_client
+
+
+        if vc and vc.is_connected():
+
+            if (
+                vc.channel
+                and vc.channel.id == channel.id
+            ):
+
+                return vc
+
+
+            try:
+
+                await vc.move_to(
+                    channel
+                )
+
+                return vc
+
+            except Exception:
+
+                log.exception(
+                    "Error moviendo el bot."
+                )
+
+                return vc
+
+
+        if vc:
+
+            try:
+
+                await vc.disconnect(
+                    force=True
+                )
+
+            except Exception:
+
+                pass
+
+            await asyncio.sleep(1)
+
+
+        try:
+
+            vc = await channel.connect(
+                reconnect=True,
+                timeout=30
+            )
+
+            log.info(
+                "Conectado a voz: %s",
+                channel.name
+            )
+
+            return vc
+
+
+        except asyncio.TimeoutError:
+
+            raise RuntimeError(
+                "Discord tardó demasiado "
+                "en conectar al canal."
+            )
+
+
+        except Exception as e:
+
+            log.exception(
+                "Error conectando a voz."
+            )
+
+            raise RuntimeError(
+                f"No pude conectarme a voz: {e}"
+            )
+
+
+# ============================================================
+# AUDIO
+# ============================================================
+
+def create_audio_source(
+    audio_url: str
+):
+
+    source = discord.FFmpegPCMAudio(
+
+        audio_url,
+
+        executable=FFMPEG_PATH,
+
+        before_options=(
+            "-reconnect 1 "
+            "-reconnect_streamed 1 "
+            "-reconnect_delay_max 5"
+        ),
+
+        options=(
+            "-vn "
+            "-loglevel warning "
+            "-ac 2 "
+            "-ar 48000"
+        )
+    )
+
+
+    return discord.PCMVolumeTransformer(
+        source,
+        volume=0.7
+    )
 
 
 # ============================================================
@@ -596,40 +636,169 @@ async def on_ready():
 
 @bot.tree.command(
     name="join",
-    description="Entra a tu canal de voz."
+    description="Hace que el bot entre a tu canal de voz."
 )
-async def join(interaction):
-
-    await interaction.response.defer()
-
-    if not interaction.guild:
-        return await interaction.followup.send(
-            "❌ Este comando solo funciona en servidores."
-        )
-
-    member = interaction.user
-
-    if not member.voice or not member.voice.channel:
-
-        return await interaction.followup.send(
-            "❌ Primero entra a un canal de voz."
-        )
+async def join(
+    interaction: discord.Interaction
+):
 
     try:
 
-        await connect_voice(
-            interaction.guild,
-            member.voice.channel
-        )
+        await interaction.response.defer()
+
+    except discord.NotFound:
+
+        return
+
+
+    guild = interaction.guild
+
+
+    if guild is None:
 
         await interaction.followup.send(
-            f"🔊 Conectado a **{member.voice.channel.name}**."
+            "❌ Este comando solo funciona "
+            "dentro de un servidor."
         )
+
+        return
+
+
+    member = interaction.user
+
+
+    if not isinstance(
+        member,
+        discord.Member
+    ):
+
+        await interaction.followup.send(
+            "❌ No pude comprobar tu canal."
+        )
+
+        return
+
+
+    if (
+        not member.voice
+        or not member.voice.channel
+    ):
+
+        await interaction.followup.send(
+            "❌ Primero entra a un canal de voz."
+        )
+
+        return
+
+
+    channel = member.voice.channel
+
+
+    try:
+
+        await connect_to_voice(
+            guild,
+            channel
+        )
+
+        bot.join_channels[
+            guild.id
+        ] = channel.id
+
+
+        await interaction.followup.send(
+            f"🔊 Conectado a **{channel.name}**.\n"
+            "🎧 Me quedaré conectado "
+            "hasta usar `/leave`."
+        )
+
 
     except Exception as e:
 
         await interaction.followup.send(
-            f"❌ {e}"
+            f"❌ Error conectando a voz:\n`{e}`"
+        )
+
+
+# ============================================================
+# /LEAVE
+# ============================================================
+
+@bot.tree.command(
+    name="leave",
+    description="Saca al bot del canal de voz."
+)
+async def leave(
+    interaction: discord.Interaction
+):
+
+    try:
+
+        await interaction.response.defer()
+
+    except discord.NotFound:
+
+        return
+
+
+    guild = interaction.guild
+
+
+    if guild is None:
+
+        await interaction.followup.send(
+            "❌ Este comando solo funciona "
+            "dentro de un servidor."
+        )
+
+        return
+
+
+    vc = guild.voice_client
+
+
+    if not vc:
+
+        await interaction.followup.send(
+            "❌ No estoy conectado "
+            "a ningún canal."
+        )
+
+        return
+
+
+    try:
+
+        if vc.is_playing():
+
+            vc.stop()
+
+
+        bot.queues[
+            guild.id
+        ].clear()
+
+
+        await vc.disconnect(
+            force=True
+        )
+
+
+        bot.join_channels.pop(
+            guild.id,
+            None
+        )
+
+
+        await interaction.followup.send(
+            "👋 Salí del canal de voz."
+        )
+
+
+    except Exception as e:
+
+        await interaction.followup.send(
+            f"❌ Error saliendo:\n`{e}`"
         )
 
 
@@ -639,67 +808,173 @@ async def join(interaction):
 
 @bot.tree.command(
     name="play",
-    description="Reproduce una canción o playlist."
+    description="Reproduce música desde YouTube."
 )
 @app_commands.describe(
-    query="Link de YouTube, playlist o búsqueda"
+    link="Link o búsqueda de YouTube"
 )
-async def play(interaction, query: str):
-
-    await interaction.response.defer()
-
-    guild = interaction.guild
-
-    if not guild:
-        return await interaction.followup.send(
-            "❌ Solo funciona en servidores."
-        )
-
-    member = interaction.user
-
-    if not member.voice or not member.voice.channel:
-
-        return await interaction.followup.send(
-            "❌ Entra primero a un canal de voz."
-        )
+async def play(
+    interaction: discord.Interaction,
+    link: str
+):
 
     try:
 
-        await connect_voice(
-            guild,
-            member.voice.channel
-        )
+        await interaction.response.defer()
+
+    except discord.NotFound:
+
+        return
+
+
+    guild = interaction.guild
+
+
+    if guild is None:
 
         await interaction.followup.send(
-            "🔎 Buscando..."
+            "❌ Solo funciona en servidores."
         )
 
-        tracks = await get_tracks(query)
+        return
 
-        was_empty = not bot.queues[guild.id]
 
-        bot.queues[guild.id].extend(tracks)
+    member = interaction.user
 
-        if len(tracks) == 1:
 
-            msg = (
-                f"🎵 Añadido a la cola: "
-                f"**{tracks[0]['title']}**"
+    if not isinstance(
+        member,
+        discord.Member
+    ):
+
+        await interaction.followup.send(
+            "❌ No pude comprobar tu canal."
+        )
+
+        return
+
+
+    if (
+        not member.voice
+        or not member.voice.channel
+    ):
+
+        await interaction.followup.send(
+            "❌ Entra primero a un canal de voz."
+        )
+
+        return
+
+
+    channel = member.voice.channel
+
+
+    try:
+
+        vc = await connect_to_voice(
+            guild,
+            channel
+        )
+
+
+        bot.join_channels[
+            guild.id
+        ] = channel.id
+
+
+        await interaction.followup.send(
+            "🔎 Buscando la canción..."
+        )
+
+
+        try:
+
+            data = await get_youtube_info(
+                link
             )
 
-        else:
+        except Exception as e:
 
-            msg = (
-                f"📋 Playlist añadida.\n"
-                f"🎵 Canciones: **{len(tracks)}**"
+            await interaction.channel.send(
+                "❌ No pude obtener el audio "
+                "de YouTube.\n\n"
+                f"`{e}`"
             )
 
-        await interaction.channel.send(msg)
+            return
 
-        # Si no estaba reproduciendo, arrancamos
-        if was_empty:
 
-            start_queue(guild)
+        audio_url = data.get(
+            "url"
+        )
+
+
+        title = data.get(
+            "title",
+            "Canción desconocida"
+        )
+
+
+        webpage = data.get(
+            "webpage_url",
+            link
+        )
+
+
+        if not audio_url:
+
+            await interaction.channel.send(
+                "❌ YouTube no entregó "
+                "una URL de audio."
+            )
+
+            return
+
+
+        if (
+            vc.is_playing()
+            or vc.is_paused()
+        ):
+
+            vc.stop()
+
+
+        source = create_audio_source(
+            audio_url
+        )
+
+
+        def after_play(error):
+
+            if error:
+
+                log.error(
+                    "Error reproduciendo '%s': %s",
+                    title,
+                    error
+                )
+
+            else:
+
+                log.info(
+                    "Terminó: %s",
+                    title
+                )
+
+
+        vc.play(
+            source,
+            after=after_play
+        )
+
+
+        await interaction.channel.send(
+            f"🎵 **Reproduciendo**\n"
+            f"**{title}**\n"
+            f"🔊 Volumen: 70%\n"
+            f"🔗 {webpage}"
+        )
+
 
     except Exception as e:
 
@@ -707,149 +982,16 @@ async def play(interaction, query: str):
             "Error en /play"
         )
 
-        await interaction.channel.send(
-            f"❌ **Error:**\n`{e}`"
-        )
 
+        try:
 
-# ============================================================
-# /ADD
-# ============================================================
+            await interaction.channel.send(
+                f"❌ Error reproduciendo:\n`{e}`"
+            )
 
-@bot.tree.command(
-    name="add",
-    description="Agrega una canción o playlist a la cola."
-)
-@app_commands.describe(
-    query="Link de YouTube, playlist o búsqueda"
-)
-async def add(interaction, query: str):
+        except Exception:
 
-    await interaction.response.defer()
-
-    guild = interaction.guild
-
-    if not guild:
-        return await interaction.followup.send(
-            "❌ Solo funciona en servidores."
-        )
-
-    member = interaction.user
-
-    if not member.voice or not member.voice.channel:
-
-        return await interaction.followup.send(
-            "❌ Entra primero a un canal de voz."
-        )
-
-    try:
-
-        await connect_voice(
-            guild,
-            member.voice.channel
-        )
-
-        await interaction.followup.send(
-            "🔎 Agregando a la cola..."
-        )
-
-        tracks = await get_tracks(query)
-
-        bot.queues[guild.id].extend(tracks)
-
-        await interaction.channel.send(
-            f"✅ Se agregaron **{len(tracks)}** "
-            f"canciones a la cola."
-        )
-
-        start_queue(guild)
-
-    except Exception as e:
-
-        await interaction.channel.send(
-            f"❌ **Error:**\n`{e}`"
-        )
-
-
-# ============================================================
-# /QUEUE
-# ============================================================
-
-@bot.tree.command(
-    name="queue",
-    description="Muestra la cola."
-)
-async def queue(interaction):
-
-    guild = interaction.guild
-
-    if not guild:
-        return await interaction.response.send_message(
-            "❌ Solo funciona en servidores."
-        )
-
-    songs = bot.queues[guild.id]
-
-    if not songs:
-
-        return await interaction.response.send_message(
-            "📭 La cola está vacía."
-        )
-
-    lines = []
-
-    for i, song in enumerate(songs[:20], 1):
-
-        lines.append(
-            f"**{i}.** {song['title']}"
-        )
-
-    more = ""
-
-    if len(songs) > 20:
-
-        more = (
-            f"\n\n... y "
-            f"**{len(songs) - 20}** más."
-        )
-
-    await interaction.response.send_message(
-        "🎵 **COLA**\n\n"
-        + "\n".join(lines)
-        + more
-    )
-
-
-# ============================================================
-# /SKIP
-# ============================================================
-
-@bot.tree.command(
-    name="skip",
-    description="Salta la canción actual."
-)
-async def skip(interaction):
-
-    guild = interaction.guild
-
-    if not guild:
-        return await interaction.response.send_message(
-            "❌ Solo funciona en servidores."
-        )
-
-    vc = guild.voice_client
-
-    if not vc or not vc.is_playing():
-
-        return await interaction.response.send_message(
-            "❌ No hay ninguna canción reproduciéndose."
-        )
-
-    vc.stop()
-
-    await interaction.response.send_message(
-        "⏭️ Canción saltada."
-    )
+            pass
 
 
 # ============================================================
@@ -860,7 +1002,9 @@ async def skip(interaction):
     name="pause",
     description="Pausa la música."
 )
-async def pause(interaction):
+async def pause(
+    interaction: discord.Interaction
+):
 
     vc = (
         interaction.guild.voice_client
@@ -868,13 +1012,27 @@ async def pause(interaction):
         else None
     )
 
-    if not vc or not vc.is_playing():
 
-        return await interaction.response.send_message(
+    if not vc:
+
+        await interaction.response.send_message(
+            "❌ No estoy conectado a voz."
+        )
+
+        return
+
+
+    if not vc.is_playing():
+
+        await interaction.response.send_message(
             "❌ No hay música reproduciéndose."
         )
 
+        return
+
+
     vc.pause()
+
 
     await interaction.response.send_message(
         "⏸️ Música pausada."
@@ -887,9 +1045,11 @@ async def pause(interaction):
 
 @bot.tree.command(
     name="resume",
-    description="Reanuda la música."
+    description="Continúa la música."
 )
-async def resume(interaction):
+async def resume(
+    interaction: discord.Interaction
+):
 
     vc = (
         interaction.guild.voice_client
@@ -897,13 +1057,27 @@ async def resume(interaction):
         else None
     )
 
-    if not vc or not vc.is_paused():
 
-        return await interaction.response.send_message(
+    if not vc:
+
+        await interaction.response.send_message(
+            "❌ No estoy conectado a voz."
+        )
+
+        return
+
+
+    if not vc.is_paused():
+
+        await interaction.response.send_message(
             "❌ La música no está pausada."
         )
 
+        return
+
+
     vc.resume()
+
 
     await interaction.response.send_message(
         "▶️ Música reanudada."
@@ -918,77 +1092,143 @@ async def resume(interaction):
     name="stop",
     description="Detiene la música."
 )
-async def stop(interaction):
+async def stop(
+    interaction: discord.Interaction
+):
 
-    guild = interaction.guild
+    vc = (
+        interaction.guild.voice_client
+        if interaction.guild
+        else None
+    )
 
-    if not guild:
-        return await interaction.response.send_message(
-            "❌ Solo funciona en servidores."
-        )
-
-    vc = guild.voice_client
 
     if not vc:
 
-        return await interaction.response.send_message(
-            "❌ No estoy conectado."
+        await interaction.response.send_message(
+            "❌ No estoy conectado a voz."
         )
+
+        return
+
+
+    if (
+        not vc.is_playing()
+        and not vc.is_paused()
+    ):
+
+        await interaction.response.send_message(
+            "❌ No hay música."
+        )
+
+        return
+
 
     vc.stop()
 
-    bot.queues[guild.id].clear()
 
     await interaction.response.send_message(
-        "⏹️ Música detenida y cola vaciada."
+        "⏹️ Música detenida.\n"
+        "🔊 Sigo conectado al canal."
     )
 
 
 # ============================================================
-# /LEAVE
+# /SKIP
 # ============================================================
 
 @bot.tree.command(
-    name="leave",
-    description="Sale del canal de voz."
+    name="skip",
+    description="Salta la canción actual."
 )
-async def leave(interaction):
+async def skip(
+    interaction: discord.Interaction
+):
+
+    vc = (
+        interaction.guild.voice_client
+        if interaction.guild
+        else None
+    )
+
+
+    if not vc:
+
+        await interaction.response.send_message(
+            "❌ No estoy conectado a voz."
+        )
+
+        return
+
+
+    if (
+        not vc.is_playing()
+        and not vc.is_paused()
+    ):
+
+        await interaction.response.send_message(
+            "❌ No hay ninguna canción."
+        )
+
+        return
+
+
+    vc.stop()
+
+
+    await interaction.response.send_message(
+        "⏭️ Canción saltada."
+    )
+
+
+# ============================================================
+# /QUEUE
+# ============================================================
+
+@bot.tree.command(
+    name="queue",
+    description="Muestra la cola."
+)
+async def queue(
+    interaction: discord.Interaction
+):
 
     guild = interaction.guild
 
-    if not guild:
-        return await interaction.response.send_message(
+
+    if guild is None:
+
+        await interaction.response.send_message(
             "❌ Solo funciona en servidores."
         )
 
-    task = bot.queue_tasks.get(guild.id)
+        return
 
-    if task and not task.done():
-        task.cancel()
 
-    bot.queues[guild.id].clear()
+    songs = bot.queues[
+        guild.id
+    ]
 
-    vc = guild.voice_client
 
-    if vc:
+    if not songs:
 
-        try:
-            vc.stop()
-        except Exception:
-            pass
+        await interaction.response.send_message(
+            "📭 La cola está vacía."
+        )
 
-        try:
-            await vc.disconnect(force=True)
-        except Exception:
-            pass
+        return
 
-    bot.join_channels.pop(
-        guild.id,
-        None
+
+    text = "\n".join(
+        f"**{i + 1}.** {song}"
+        for i, song in enumerate(
+            songs[:20]
+        )
     )
 
+
     await interaction.response.send_message(
-        "👋 Salí del canal y limpié la cola."
+        f"🎵 **Cola:**\n{text}"
     )
 
 
@@ -997,19 +1237,25 @@ async def leave(interaction):
 # ============================================================
 
 @bot.tree.error
-async def command_error(
-    interaction,
-    error
+async def on_app_command_error(
+    interaction: discord.Interaction,
+    error: app_commands.AppCommandError
 ):
 
     log.exception(
-        "Error de comando: %s",
+        "Error en slash command: %s",
         error
     )
 
+
     try:
 
-        message = f"❌ Error:\n`{error}`"
+        message = (
+            "❌ Ocurrió un error ejecutando "
+            "el comando.\n"
+            f"`{error}`"
+        )
+
 
         if interaction.response.is_done():
 
@@ -1025,28 +1271,52 @@ async def command_error(
                 ephemeral=True
             )
 
+
     except Exception:
+
         pass
 
 
 # ============================================================
-# START
+# MAIN
 # ============================================================
 
 if __name__ == "__main__":
 
-    print("🚀 Iniciando Azulita...")
+    print(
+        "🚀 Iniciando bot..."
+    )
+
 
     if not TOKEN:
 
-        raise RuntimeError(
-            "Falta la variable DISCORD_TOKEN en Railway."
+        print(
+            "❌ FALTA DISCORD_TOKEN"
         )
 
-    if shutil.which("ffmpeg") is None:
-
         raise RuntimeError(
-            "FFmpeg no está instalado/disponible en PATH."
+            "Configura DISCORD_TOKEN "
+            "en Railway."
         )
 
-    bot.run(TOKEN)
+
+    try:
+
+        bot.run(
+            TOKEN
+        )
+
+
+    except KeyboardInterrupt:
+
+        print(
+            "\n🛑 Bot detenido."
+        )
+
+
+    except Exception as e:
+
+        log.exception(
+            "El bot terminó con error: %s",
+            e
+        )
