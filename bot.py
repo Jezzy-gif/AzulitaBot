@@ -15,7 +15,7 @@ import yt_dlp
 # CONFIGURACIÓN
 # ============================================================
 
-TOKEN = "Pon_TU_TOKEN"
+TOKEN = os.getenv("DISCORD_TOKEN")
 
 # Tu FFmpeg
 FFMPEG_PATH = "ffmpeg"
