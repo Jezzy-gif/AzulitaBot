@@ -16,6 +16,7 @@ import yt_dlp
 # ============================================================
 
 TOKEN = os.getenv("DISCORD_TOKEN")
+
 FFMPEG_PATH = "ffmpeg"
 
 
@@ -41,24 +42,33 @@ print("🔍 COMPROBANDO INSTALACIÓN")
 print("======================================")
 print(f"🐍 Python: {sys.version}")
 print(f"📦 discord.py: {discord.__version__}")
+print(f"📦 yt-dlp: {yt_dlp.version.__version__}")
 print(f"🎧 FFmpeg: {FFMPEG_PATH}")
 
 if shutil.which(FFMPEG_PATH) is None:
     print("❌ NO SE ENCONTRÓ FFmpeg")
+    print("Revisa el Dockerfile.")
     sys.exit(1)
 
 print("✅ FFmpeg encontrado.")
+
+
 try:
     import davey
+
     print(
         f"🔐 davey: "
         f"{getattr(davey, '__version__', 'instalado')}"
     )
+
 except ImportError:
+
     print("❌ davey no está instalado.")
-    print("Ejecuta:")
+    print("Instálalo con:")
     print("pip install -U davey")
+
     sys.exit(1)
+
 
 print("======================================")
 print()
@@ -69,6 +79,7 @@ print()
 # ============================================================
 
 intents = discord.Intents.default()
+
 intents.guilds = True
 intents.voice_states = True
 
@@ -80,6 +91,7 @@ intents.voice_states = True
 class MusicBot(commands.Bot):
 
     def __init__(self):
+
         super().__init__(
             command_prefix="!",
             intents=intents
@@ -93,9 +105,11 @@ class MusicBot(commands.Bot):
 
         self.join_channels = {}
 
+
     async def setup_hook(self):
 
         try:
+
             synced = await self.tree.sync()
 
             log.info(
@@ -110,22 +124,36 @@ class MusicBot(commands.Bot):
                 e
             )
 
+
     async def on_ready(self):
 
-        log.info("======================================")
+        log.info(
+            "======================================"
+        )
+
         log.info(
             "BOT CONECTADO: %s",
             self.user
         )
+
         log.info(
             "Discord.py: %s",
             discord.__version__
         )
+
+        log.info(
+            "yt-dlp: %s",
+            yt_dlp.version.__version__
+        )
+
         log.info(
             "FFmpeg: %s",
             FFMPEG_PATH
         )
-        log.info("======================================")
+
+        log.info(
+            "======================================"
+        )
 
 
 bot = MusicBot()
@@ -135,56 +163,232 @@ bot = MusicBot()
 # YT-DLP
 # ============================================================
 
-YTDLP_OPTIONS = {
+BASE_YTDLP_OPTIONS = {
+
     "format": "bestaudio/best",
+
     "noplaylist": True,
+
     "quiet": True,
+
     "no_warnings": True,
+
     "default_search": "ytsearch",
+
     "source_address": "0.0.0.0",
+
     "extract_flat": False,
-    "cookiefile": None,
+
     "skip_download": True,
+
+    "geo_bypass": True,
+
+    "nocheckcertificate": True,
+
+    "retries": 3,
+
+    "fragment_retries": 3,
+
+    "socket_timeout": 20,
+
 }
 
-YTDLP = yt_dlp.YoutubeDL(
-    YTDLP_OPTIONS
-)
+
+# ============================================================
+# CLIENTES YOUTUBE
+# ============================================================
+#
+# Probamos primero clientes que actualmente pueden funcionar
+# sin PO Token.
+#
+# Si uno falla, probamos el siguiente.
+#
+# No utilizamos cookies personales.
+# ============================================================
+
+YOUTUBE_CLIENTS = [
+
+    "android_vr",
+
+    "tv",
+
+    "web_embedded",
+
+    "mweb",
+
+    "web_safari",
+
+]
 
 
-async def get_youtube_info(query: str):
+# ============================================================
+# EXTRACCIÓN YOUTUBE
+# ============================================================
+
+async def extract_with_client(
+    query: str,
+    client: str
+):
 
     loop = asyncio.get_running_loop()
 
+    options = BASE_YTDLP_OPTIONS.copy()
+
+    options["extractor_args"] = {
+        "youtube": {
+            "player_client": [
+                client
+            ]
+        }
+    }
+
     def extract():
 
-        return YTDLP.extract_info(
-            query,
-            download=False
-        )
+        with yt_dlp.YoutubeDL(
+            options
+        ) as ydl:
 
-    data = await loop.run_in_executor(
+            return ydl.extract_info(
+                query,
+                download=False
+            )
+
+    return await loop.run_in_executor(
         None,
         extract
     )
 
-    if not data:
-        raise RuntimeError(
-            "No se pudo obtener información."
-        )
 
-    if "entries" in data:
+async def get_youtube_info(query: str):
 
-        entries = data.get("entries")
+    last_error = None
 
-        if not entries:
-            raise RuntimeError(
-                "No se encontró ninguna canción."
+    # ========================================================
+    # PRUEBA DIRECTA
+    # ========================================================
+
+    for client in YOUTUBE_CLIENTS:
+
+        try:
+
+            log.info(
+                "Probando YouTube client: %s",
+                client
             )
 
-        data = entries[0]
+            data = await extract_with_client(
+                query,
+                client
+            )
 
-    return data
+            if not data:
+                continue
+
+            if "entries" in data:
+
+                entries = data.get(
+                    "entries"
+                )
+
+                if not entries:
+                    continue
+
+                data = entries[0]
+
+            audio_url = data.get(
+                "url"
+            )
+
+            if audio_url:
+
+                log.info(
+                    "✅ YouTube funcionó con client: %s",
+                    client
+                )
+
+                return data
+
+        except Exception as e:
+
+            last_error = e
+
+            log.warning(
+                "YouTube client %s falló: %s",
+                client,
+                e
+            )
+
+    # ========================================================
+    # ÚLTIMO INTENTO: CONFIGURACIÓN NORMAL DE YT-DLP
+    # ========================================================
+
+    try:
+
+        log.info(
+            "Probando configuración automática de yt-dlp..."
+        )
+
+        options = BASE_YTDLP_OPTIONS.copy()
+
+        def extract_default():
+
+            with yt_dlp.YoutubeDL(
+                options
+            ) as ydl:
+
+                return ydl.extract_info(
+                    query,
+                    download=False
+                )
+
+        data = await asyncio.get_running_loop().run_in_executor(
+            None,
+            extract_default
+        )
+
+        if data:
+
+            if "entries" in data:
+
+                entries = data.get(
+                    "entries"
+                )
+
+                if entries:
+
+                    data = entries[0]
+
+            if data.get("url"):
+
+                return data
+
+    except Exception as e:
+
+        last_error = e
+
+        log.warning(
+            "Configuración automática falló: %s",
+            e
+        )
+
+
+    # ========================================================
+    # ERROR FINAL
+    # ========================================================
+
+    if last_error:
+
+        raise RuntimeError(
+            "YouTube está bloqueando la extracción desde "
+            "el servidor. yt-dlp probó varios clientes "
+            "compatibles, pero ninguno entregó una URL "
+            "de audio.\n\n"
+            f"Último error: {last_error}"
+        )
+
+    raise RuntimeError(
+        "No se pudo obtener el audio de YouTube."
+    )
 
 
 # ============================================================
@@ -196,7 +400,9 @@ async def connect_to_voice(
     channel: discord.VoiceChannel
 ):
 
-    lock = bot.voice_locks[guild.id]
+    lock = bot.voice_locks[
+        guild.id
+    ]
 
     async with lock:
 
@@ -208,18 +414,21 @@ async def connect_to_voice(
                 vc.channel
                 and vc.channel.id == channel.id
             ):
+
                 return vc
 
             try:
 
-                await vc.move_to(channel)
+                await vc.move_to(
+                    channel
+                )
 
                 return vc
 
             except Exception:
 
                 log.exception(
-                    "Error moviendo el bot de canal."
+                    "Error moviendo el bot."
                 )
 
                 return vc
@@ -227,9 +436,11 @@ async def connect_to_voice(
         if vc:
 
             try:
+
                 await vc.disconnect(
                     force=True
                 )
+
             except Exception:
                 pass
 
@@ -253,7 +464,7 @@ async def connect_to_voice(
 
             raise RuntimeError(
                 "Discord tardó demasiado "
-                "en conectar al canal de voz."
+                "en conectar al canal."
             )
 
         except Exception as e:
@@ -268,13 +479,17 @@ async def connect_to_voice(
 
 
 # ============================================================
-# CREAR AUDIO
+# AUDIO
 # ============================================================
 
-def create_audio_source(audio_url: str):
+def create_audio_source(
+    audio_url: str
+):
 
     source = discord.FFmpegPCMAudio(
+
         audio_url,
+
         executable=FFMPEG_PATH,
 
         before_options=(
@@ -310,9 +525,11 @@ async def join(
 ):
 
     try:
+
         await interaction.response.defer()
 
     except discord.NotFound:
+
         return
 
     guild = interaction.guild
@@ -334,8 +551,7 @@ async def join(
     ):
 
         await interaction.followup.send(
-            "❌ No pude comprobar "
-            "tu canal de voz."
+            "❌ No pude comprobar tu canal."
         )
 
         return
@@ -360,12 +576,13 @@ async def join(
             channel
         )
 
-        bot.join_channels[guild.id] = channel.id
+        bot.join_channels[
+            guild.id
+        ] = channel.id
 
         await interaction.followup.send(
             f"🔊 Conectado a **{channel.name}**.\n"
-            f"🎧 Me quedaré conectado "
-            f"hasta usar `/leave`."
+            f"🎧 Me quedaré conectado hasta `/leave`."
         )
 
     except Exception as e:
@@ -388,9 +605,11 @@ async def leave(
 ):
 
     try:
+
         await interaction.response.defer()
 
     except discord.NotFound:
+
         return
 
     guild = interaction.guild
@@ -409,8 +628,7 @@ async def leave(
     if not vc:
 
         await interaction.followup.send(
-            "❌ No estoy conectado "
-            "a ningún canal."
+            "❌ No estoy conectado."
         )
 
         return
@@ -418,9 +636,12 @@ async def leave(
     try:
 
         if vc.is_playing():
+
             vc.stop()
 
-        bot.queues[guild.id].clear()
+        bot.queues[
+            guild.id
+        ].clear()
 
         await vc.disconnect(
             force=True
@@ -438,7 +659,7 @@ async def leave(
     except Exception as e:
 
         await interaction.followup.send(
-            f"❌ Error saliendo de voz:\n`{e}`"
+            f"❌ Error saliendo:\n`{e}`"
         )
 
 
@@ -459,9 +680,11 @@ async def play(
 ):
 
     try:
+
         await interaction.response.defer()
 
     except discord.NotFound:
+
         return
 
     guild = interaction.guild
@@ -469,8 +692,7 @@ async def play(
     if guild is None:
 
         await interaction.followup.send(
-            "❌ Este comando solo funciona "
-            "dentro de un servidor."
+            "❌ Solo funciona en servidores."
         )
 
         return
@@ -508,7 +730,9 @@ async def play(
             channel
         )
 
-        bot.join_channels[guild.id] = channel.id
+        bot.join_channels[
+            guild.id
+        ] = channel.id
 
         await interaction.followup.send(
             "🔎 Buscando la canción..."
@@ -524,13 +748,15 @@ async def play(
 
             await interaction.channel.send(
                 "❌ No pude obtener el audio "
-                "de YouTube.\n"
+                "de YouTube.\n\n"
                 f"`{e}`"
             )
 
             return
 
-        audio_url = data.get("url")
+        audio_url = data.get(
+            "url"
+        )
 
         title = data.get(
             "title",
@@ -555,6 +781,7 @@ async def play(
             vc.is_playing()
             or vc.is_paused()
         ):
+
             vc.stop()
 
         source = create_audio_source(
@@ -566,7 +793,7 @@ async def play(
             if error:
 
                 log.error(
-                    "Error reproduciendo '%s': %s",
+                    "Error reproduciendo %s: %s",
                     title,
                     error
                 )
@@ -635,7 +862,7 @@ async def pause(
     if not vc.is_playing():
 
         await interaction.response.send_message(
-            "❌ No hay música reproduciéndose."
+            "❌ No hay música."
         )
 
         return
@@ -729,7 +956,7 @@ async def stop(
 
     await interaction.response.send_message(
         "⏹️ Música detenida.\n"
-        "🔊 Sigo conectado al canal."
+        "🔊 Sigo conectado."
     )
 
 
@@ -799,7 +1026,9 @@ async def queue(
 
         return
 
-    songs = bot.queues[guild.id]
+    songs = bot.queues[
+        guild.id
+    ]
 
     if not songs:
 
@@ -822,7 +1051,7 @@ async def queue(
 
 
 # ============================================================
-# ERRORES DE SLASH COMMANDS
+# ERRORES
 # ============================================================
 
 @bot.tree.error
@@ -859,6 +1088,7 @@ async def on_app_command_error(
             )
 
     except Exception:
+
         pass
 
 
@@ -877,7 +1107,7 @@ if __name__ == "__main__":
         print()
         print(
             "Configura DISCORD_TOKEN "
-            "en las Variables de Railway."
+            "en Railway > Variables."
         )
         print()
 
@@ -891,7 +1121,9 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
 
-        print("\n🛑 Bot detenido.")
+        print(
+            "\n🛑 Bot detenido."
+        )
 
     except Exception as e:
 
